@@ -24,7 +24,7 @@ from mdgo.util import (
     res_dict_from_datafile,
     select_dict_from_resname,
 )
-from mdgo.conductivity import calc_cond, conductivity_calculator
+from mdgo.conductivity import calc_cond_msd, conductivity_calculator, choose_msd_fitting_region, get_beta
 from mdgo.coordination import (
     concat_coord_array,
     num_of_neighbor,
@@ -70,6 +70,7 @@ class MdRun:
         anion_charge: Charge of anion. Default to 1.
         temperature: Temperature of the MD run. Default to 298.15.
         cond: Whether to calculate conductivity MSD. Default to True.
+        units: unit system (currently 'real' and 'lj' are supported)
     """
 
     def __init__(
@@ -87,6 +88,7 @@ class MdRun:
         anion_charge: float = -1,
         temperature: float = 298.15,
         cond: bool = True,
+        units="real",
     ):
         """
         Base constructor. This is a low level constructor designed to work with
@@ -115,7 +117,7 @@ class MdRun:
         else:
             self.select_dict = select_dict
         self.nvt_steps = self.wrapped_run.trajectory.n_frames
-        self.time_array = [i * self.time_step for i in range(self.nvt_steps)]
+        self.time_array = np.array([i * self.time_step for i in range(self.nvt_steps - self.nvt_start)])
         self.cation_name = cation_name
         self.anion_name = anion_name
         self.cation_charge = cation_charge
@@ -141,6 +143,7 @@ class MdRun:
         faraday_constant_2 = 96485 * 96485
         self.c = (self.num_cation / (self.nvt_v * 1e-30)) / (6.022 * 1e23)
         self.d_to_sigma = self.c * faraday_constant_2 / (gas_constant * temp)
+        self.units = units
 
     @classmethod
     def from_lammps(
@@ -159,6 +162,7 @@ class MdRun:
         anion_charge: float = -1,
         temperature: float = 298.15,
         cond: bool = True,
+        units: str = "real",
     ):
         """
         Constructor from lammps data file and wrapped and unwrapped trajectory dcd file.
@@ -178,6 +182,7 @@ class MdRun:
             anion_charge: Charge of anion. Default to 1.
             temperature: Temperature of the MD run. Default to 298.15.
             cond: Whether to calculate conductivity MSD. Default to True.
+            units: unit system (currently 'real' and 'lj' are supported)
         """
         if res_dict is None:
             res_dict = res_dict_from_datafile(data_dir)
@@ -198,6 +203,7 @@ class MdRun:
             anion_charge=anion_charge,
             temperature=temperature,
             cond=cond,
+            units=units,
         )
 
     def get_init_dimension(self) -> np.ndarray:
@@ -228,7 +234,7 @@ class MdRun:
             if ave_dx[-1] >= ave_dx[-2]:
                 convergence = i
                 break
-        d = list()
+        d = []
         for j in range(convergence, npt_range):
             d.append(self.wrapped_run.trajectory[j].dimensions)
         return np.mean(np.array(d), axis=0)
@@ -248,7 +254,7 @@ class MdRun:
         nvt_run = self.unwrapped_run
         cations = nvt_run.select_atoms(self.select_dict.get("cation"))
         anions = nvt_run.select_atoms(self.select_dict.get("anion"))
-        cond_array = calc_cond(
+        cond_array = calc_cond_msd(
             nvt_run,
             anions,
             cations,
@@ -258,52 +264,107 @@ class MdRun:
         )
         return cond_array
 
-    def plot_cond_array(self, start: int, end: int, *runs: MdRun, reference: bool = True):
-        """Plots the conductivity MSD as a function of time.
+    def choose_cond_fit_region(self) -> tuple:
+        """Computes the optimal fitting region (linear regime) of conductivity MSD.
 
         Args:
-            start: Start time step.
-            end: End time step.
-            runs: Other runs to be compared in the same plot.
-            reference: Whether to plot reference line. Default to True.
+            msd (numpy.array): mean squared displacement
+
+        Returns at tuple with the start of the fitting regime (int), end of the
+        fitting regime (int), and the beta value of the fitting regime (float).
         """
         if self.cond_array is None:
             self.cond_array = self.get_cond_array()
+        start, end, beta = choose_msd_fitting_region(self.cond_array, self.time_array)
+        return start, end, beta
+
+    def plot_cond_array(
+        self,
+        start: int = -1,
+        end: int = -1,
+        *runs: MdRun,
+        reference: bool = True,
+    ):
+        """Plots the conductivity MSD as a function of time.
+        If no fitting region (start, end) is provided, computes the optimal
+        fitting region based on the portion of the MSD with greatest
+        linearity.
+
+        Args:
+            start (int): Start time step for fitting.
+            end (int): End time step for fitting.
+            runs (MdRun): Other runs to be compared in the same plot.
+            reference (bool): Whether to plot reference line.
+                Default to True.
+            units (str): unit system (currently 'real' and 'lj' are supported)
+        """
+        if self.cond_array is None:
+            self.cond_array = self.get_cond_array()
+        if start == -1 and end == -1:
+            start, end, _ = choose_msd_fitting_region(self.cond_array, self.time_array)
         colors = ["g", "r", "c", "m", "y", "k"]
         fig = plt.figure()
         ax = fig.add_subplot(1, 1, 1)
         ax.loglog(
-            self.time_array[start:end],
-            self.cond_array[start:end],
+            self.time_array,
+            self.cond_array,
             color="b",
             lw=2,
             label=self.name,
         )
         for i, run in enumerate(runs):
             ax.loglog(
-                run.time_array[start:end],
-                run.cond_array[start:end],
+                run.time_array,
+                run.cond_array,
                 color=colors[i],
                 lw=2,
                 label=run.name,
             )
         if reference:
-            ax.loglog((100000, 1000000), (1000, 10000))
-        ax.set_ylabel("MSD (A^2)")
-        ax.set_xlabel("Time (ps)")
-        ax.set_ylim([10, 1000000])
-        ax.set_xlim([100, 500000000])
+            slope_guess = (self.cond_array[int(np.log(len(self.time_array)) / 2)] - self.cond_array[5]) / (
+                self.time_array[int(np.log(len(self.time_array)) / 2)] - self.time_array[5]
+            )
+            ax.loglog(self.time_array[start:end], np.array(self.time_array[start:end]) * slope_guess * 2, "k--")
+        if self.units == "real":
+            ax.set_ylabel("MSD (A$^2$)")
+            ax.set_xlabel("Time (ps)")
+        elif self.units == "lj":
+            ax.set_ylabel("MSD ($\\sigma^2$)")
+            ax.set_xlabel("Time ($\\tau$)")
+        else:
+            raise ValueError("units selection not supported")
+        ax.set_ylim(min(np.abs(self.cond_array[1:])) * 0.9, max(np.abs(self.cond_array)) * 1.2)
         ax.legend()
         fig.show()
 
-    def get_conductivity(self, start: int, end: int) -> float:
-        """Calculates the Green-Kubo (GK) conductivity in mS/cm.
+    def get_conductivity(self, start: int = -1, end: int = -1) -> float:
+        """Calculates the Green-Kubo (GK) conductivity given fitting region.
+        If no fitting region (start, end) is provided, computes the optimal
+        fitting region based on the portion of the MSD with greatest
+        linearity.
 
         Args:
-            start: Start time step.
-            end: End time step.
+            start (int): Start time step for fitting MSD.
+            end (int): End time step for fitting MSD.
+
+        Print and return conductivity.
         """
-        cond = conductivity_calculator(self.time_array, self.cond_array, self.nvt_v, self.name, start, end)
+        if start == -1 and end == -1:
+            start, end, beta = choose_msd_fitting_region(self.cond_array, self.time_array)
+        else:
+            beta, _ = get_beta(self.cond_array, self.time_array, start, end)
+        # print info on fitting
+        time_units = ""
+        if self.units == "real":
+            time_units = "ps"
+        elif self.units == "lj":
+            time_units = "tau"
+        print(f"Start of linear fitting regime: {start} ({self.time_array[start]} {time_units})")
+        print(f"End of linear fitting regime: {end} ({self.time_array[end]} {time_units})")
+        print(f"Beta value (fit to MSD = t^\u03B2): {beta} (\u03B2 = 1 in the diffusive regime)")
+        cond = conductivity_calculator(
+            self.time_array, self.cond_array, self.nvt_v, self.name, start, end, self.temp, self.units
+        )
         return cond
 
     def coord_num_array_single_species(
@@ -553,7 +614,7 @@ class MdRun:
         percent_list = []
         for i in range(len(combined)):
             item_list.append(str(int(combined[i, 0])))
-            percent_list.append(str("%.4f" % (combined[i, 1] / combined[:, 1].sum() * 100)) + "%")
+            percent_list.append(f"{(combined[i, 1] / combined[:, 1].sum() * 100):.4f}%")
         df_dict = {item_name: item_list, "Percentage": percent_list}
         df = pd.DataFrame(df_dict)
         return df
@@ -580,9 +641,9 @@ class MdRun:
         item_name = "Species in first solvation shell"
         item_list = []
         cn_list = []
-        for kw in cn_values:
+        for kw, val in cn_values.items():
             if kw != "total":
-                shell_component, shell_count = np.unique(cn_values[kw].flatten(), return_counts=True)
+                shell_component, shell_count = np.unique(val.flatten(), return_counts=True)
                 cn = (shell_component * shell_count / shell_count.sum()).sum()
                 item_list.append(kw)
                 cn_list.append(cn)
@@ -624,7 +685,7 @@ class MdRun:
         for i in range(len(combined)):
             item = str(int(combined[i, 0]))
             item_list.append(item_dict.get(item))
-            percent_list.append(str("%.4f" % (combined[i, 1] / combined[:, 1].sum() * 100)) + "%")
+            percent_list.append(f"{(combined[i, 1] / combined[:, 1].sum() * 100):.4f}%")
         df_dict = {item_name: item_list, "Percentage": percent_list}
         df = pd.DataFrame(df_dict)
         return df
@@ -658,9 +719,9 @@ class MdRun:
         ssip_list = []
         cip_list = []
         agg_list = []
-        for kw in cn_values:
+        for kw, val in cn_values.items():
             if kw != "total":
-                shell_component, shell_count = np.unique(cn_values[kw].flatten(), return_counts=True)
+                shell_component, shell_count = np.unique(val.flatten(), return_counts=True)
                 cn = (shell_component * shell_count / shell_count.sum()).sum()
                 if kw.startswith("ssip_"):
                     item_list.append(kw[5:])
@@ -751,19 +812,9 @@ class MdRun:
         if percentage != 1:
             d = (msd_array[start] - msd_array[stop]) / (start - stop) / self.time_step / 6 * a2 / ps
             sigma = percentage * d * self.d_to_sigma * s_m_to_ms_cm
-            print(
-                "Diffusivity of",
-                "%.2f" % (percentage * 100) + "% " + species + ": ",
-                d,
-                "m^2/s",
-            )
+            print(f"Diffusivity of {(percentage * 100):.2f}% {species}: {d} m^2/s")
             if species.lower() == "cation" or species.lower() == "li":
-                print(
-                    "NE Conductivity of",
-                    "%.2f" % (percentage * 100) + "% " + species + ": ",
-                    sigma,
-                    "mS/cm",
-                )
+                print(f"NE Conductivity of {(percentage * 100):.2f}% {species}: {sigma}mS/cm")
         else:
             d = (msd_array[start] - msd_array[stop]) / (start - stop) / self.time_step / 6 * a2 / ps
             sigma = d * self.d_to_sigma * s_m_to_ms_cm
@@ -942,8 +993,8 @@ class MdRun:
             A dictionary containing the number of trj logged, the averaged coordination number and standard deviation
             for each species, and the corresponding time sequence.
         """
-        in_list: Dict[str, List[np.ndarray]] = dict()
-        out_list: Dict[str, List[np.ndarray]] = dict()
+        in_list: Dict[str, List[np.ndarray]] = {}
+        out_list: Dict[str, List[np.ndarray]] = {}
         for k in list(distance_dict):
             in_list[k] = []
             out_list[k] = []
@@ -981,13 +1032,13 @@ class MdRun:
                     binding_site,
                     center_atom,
                 )
-        cn_dict = dict()
+        cn_dict = {}
         cn_dict["time"] = np.array([i * self.time_step - lag_step * self.time_step for i in range(lag_step * 2 + 1)])
         for k in list(distance_dict):
             if "in_count" not in cn_dict:
                 cn_dict["in_count"] = np.array(in_list[k]).shape[0]
                 cn_dict["out_count"] = np.array(out_list[k]).shape[0]
-            k_dict = dict()
+            k_dict = {}
             k_dict["in_ave"] = np.nanmean(np.array(in_list[k]), axis=0)
             k_dict["in_err"] = np.nanstd(np.array(in_list[k]), axis=0)
             k_dict["out_ave"] = np.nanmean(np.array(out_list[k]), axis=0)
@@ -1037,12 +1088,12 @@ class MdRun:
         floating_atoms = nvt_run.select_atoms(self.select_dict.get(floating_atom))
         if isinstance(cluster_terminal, str):
             terminal_atom_type: Union[str, List[str]] = self.select_dict.get(cluster_terminal, "Not defined")
-            assert terminal_atom_type != "Not defined", "{} not defined in select_dict".format(cluster_terminal)
+            assert terminal_atom_type != "Not defined", f"{cluster_terminal} not defined in select_dict"
         else:
-            terminal_atom_type = list()
+            terminal_atom_type = []
             for species in cluster_terminal:
                 atom_type = self.select_dict.get(species, "Not defined")
-                assert atom_type != "Not defined", "{} not defined in select_dict".format(species)
+                assert atom_type != "Not defined", f"{species} not defined in select_dict"
                 terminal_atom_type.append(atom_type)
         coord_list = np.array([[0, 0, 0]])
         for atom in tqdm(floating_atoms[:]):

@@ -1,6 +1,10 @@
-# ![MDGO](docs/logo_mdgo.svg)
+# ![MDGO](https://github.com/HT-MD/mdgo/blob/main/docs/logo_mdgo.svg)
 
-![Linting](https://github.com/htz1992213/mdgo/actions/workflows/lint.yml/badge.svg) ![Test](https://github.com/htz1992213/mdgo/actions/workflows/test.yml/badge.svg)
+![PyPI - Downloads](https://img.shields.io/pypi/dm/mdgo?style=plastic)
+
+[![Codacy Badge](https://api.codacy.com/project/badge/Grade/a97ce4eb53404e58b89bf41e0c3a3ee6)](https://app.codacy.com/gh/HT-MD/mdgo?utm_source=github.com&utm_medium=referral&utm_content=HT-MD/mdgo&utm_campaign=Badge_Grade_Settings)
+
+[![docs](https://readthedocs.org/projects/mdgo/badge/?version=latest&style=plastic)](https://mdgo.readthedocs.io/) ![Linting](https://github.com/HT-MD/mdgo/actions/workflows/lint.yml/badge.svg) ![Test](https://github.com/HT-MD/mdgo/actions/workflows/test.yml/badge.svg)
 
 An all-in-one code base for the classical molecualr dynamics (MD) simulation setup and results analysis. 
 
